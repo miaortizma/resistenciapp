@@ -1,6 +1,6 @@
 import * as functions from "firebase-functions";
 import * as admin from "firebase-admin";
-import { GeoPoint, FieldValue } from "@google-cloud/firestore";
+import { GeoPoint, DocumentReference, DocumentSnapshot, FieldValue } from "@google-cloud/firestore";
 import * as Geohash from "ngeohash";
 const db = admin.firestore();
 
@@ -85,96 +85,102 @@ function addToFIreBase(data: any, collection: any) {
   });
 }
 
+exports.updateComment = functions.firestore
+  .document('Comments/{commentId}')
+  .onUpdate((change, context) => {
+    const snap : DocumentSnapshot = change.after
+    if (snap.get('votes') <= -20) {
+      db.doc(`Comments.${snap.id}`).delete().then(() => {
+        console.log('Comment with votes <= -20 successfully deleted.')
+      })
+      .catch(err => {
+        console.log('updateComment: error deleting comment', err)
+      })
+    }
+  });
+
+
 enum VoteState {
   Null = 0,
   UpVote = 1,
   DownVote = 2,
   UpVoteRectified = 3,
   DownVoteRectified = 4
-};
+}
 
-exports.upVote = functions.https.onCall((data, context) => {
+
+/** 
+  This function works as a very simple state machine: 
+  Users who haven't voted on a comment can either UpVote or DownVote and move to this state.
+  Users who have already voted can rectify his/her vote and move to the state UpVoteRectified or DownVoteRectified
+
+  Only one rectification is allowed. */
+exports.vote = functions.https.onCall((data, context) => {
   return new Promise((resolve, reject) => {
+
+    let sign : number
+    let newVote : number
+    let rectifiedVote : number
+    let otherType : number
     let commentId: string
     let userId: string
-    if (typeof data.commentId !== 'string' || typeof data.userId !== 'string')  {
-      reject({ res: "400" }) // Bad Request
+    let voteType : string
+
+    if (typeof data.commentId !== 'string' || typeof data.userId !== 'string' || typeof data.voteType !== 'string')  {
+      reject({ res : "400", message : "One of the arguments is not a string" }) // Bad Request
       return
     }
+
     commentId = data.commentId
     userId = data.userId
-    const docRef = db.collection('Comments').doc(commentId)
-    docRef.get().then(function(doc) {
+    voteType = data.voteType
+    
+    switch (voteType) {
+    case 'upvote':
+      sign = 1
+      newVote = VoteState.UpVote
+      rectifiedVote = VoteState.UpVoteRectified
+      otherType = VoteState.DownVote
+    case 'downvote': 
+      sign = -1
+      newVote = VoteState.DownVote
+      rectifiedVote = VoteState.DownVoteRectified
+      otherType = VoteState.UpVote
+    default:
+      reject({ res : "400", message : "Not a valid voteType" })
+      return 
+    }
+
+    const docRef : DocumentReference = db.doc(`Comments.${commentId}`)
+    docRef.get().then(doc => {
       if (!doc.exists) {
-        reject({ res: "404" })
+        reject({ res: "404", message : "Comment doesn't exists" })
         return
       }
-      let state = VoteState.Null
+      let state : number = VoteState.Null
       if (userId in doc.get('voters')) {
         state = doc.get(`voters.${userId}`)
       }
-      if (state === VoteState.Null || state === VoteState.DownVote) {
-        const newState = (state === VoteState.Null) ? VoteState.UpVote : VoteState.UpVoteRectified
-        const increment = (state === VoteState.Null) ? 1 : 2
+      if (state === VoteState.Null || state === otherType) {
+        const newState : number  = state === VoteState.Null ? newVote : rectifiedVote
+        const increment : number = sign * (state === VoteState.Null ? 1 : 2 )
         docRef.set({ 
           voters : { userId : newState },
           votes : FieldValue.increment(increment)
-        }, { merge : true })
+        }, { 
+          merge : true 
+        })
         .then(res => { 
           console.log("upVote: success");
-          resolve({ res : "200" }) 
+          resolve({ res : "200", message : "vote successful" }) 
         })
         .catch(err => { 
-          console.log("upVote: Error writing to database", err);
-          reject(Error("upVote: Error writing to database"));
+          console.log("upVote: Error writing to database", err)
+          reject({res : "500", message : "vote : Error writing to database"})
         })
       } else {
-        reject({ res : "403" })
+        reject({ res : "403", message : "user has already voted and rectified his vote or is trying repeat the vote" })
       }
     })
   })
 })
-
-
-exports.upVote = functions.https.onCall((data, context) => {
-  return new Promise((resolve, reject) => {
-    let commentId: string
-    let userId: string
-    if (typeof data.commentId !== 'string' || typeof data.userId !== 'string')  {
-      reject({ res: "400" }) // Bad Request
-      return
-    }
-    commentId = data.commentId
-    userId = data.userId
-    const docRef = db.collection('Comments').doc(commentId)
-    docRef.get().then(function(doc) {
-      if (!doc.exists) {
-        reject({ res: "404" })
-        return
-      }
-      let state = VoteState.Null
-      if (userId in doc.get('voters')) {
-        state = doc.get(`voters.${userId}`)
-      }
-      if (state === VoteState.Null || state === VoteState.DownVote) {
-        const newState = (state === VoteState.Null) ? VoteState.UpVote : VoteState.UpVoteRectified
-        const increment = (state === VoteState.Null) ? 1 : 2
-        docRef.set({ 
-          voters : { userId : newState },
-          votes : FieldValue.increment(increment)
-        }, { merge : true })
-        .then(res => { 
-          console.log("upVote: success");
-          resolve({ res : "200" }) 
-        })
-        .catch(err => { 
-          console.log("upVote: Error writing to database", err);
-          reject(Error("upVote: Error writing to database"));
-        })
-      } else {
-        reject({ res : "403" })
-      }
-    })
-  })
-})
-
